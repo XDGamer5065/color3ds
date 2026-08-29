@@ -3,10 +3,17 @@
 #include <string.h>
 #include <stdbool.h>
 
-#define TOP_WIDTH  400
-#define BOT_WIDTH  320
-#define SCREEN_HEIGHT 240
+#define SCREEN_H 240
 #define FB_STRIDE 240
+#define TOP_W 400
+#define BOT_W 320
+
+#define MENU_X 4
+#define MENU_Y 4
+#define MENU_W 312
+#define MENU_H 232
+
+#define START_HOLD_MS 1000
 
 typedef struct {
     u8 r;
@@ -15,8 +22,8 @@ typedef struct {
     const char *name;
 } Color;
 
-/* Start the app on green. */
-static Color current_color = { 0, 255, 0, "Green" };
+/* The app starts completely green. */
+static Color current_color = {0, 255, 0, "Green"};
 
 static const Color common_colors[] = {
     {255,   0,   0, "Red"},
@@ -33,12 +40,12 @@ static const Color common_colors[] = {
     {  0, 128, 255, "Sky"}
 };
 
-#define COMMON_COUNT (sizeof(common_colors) / sizeof(common_colors[0]))
+#define COMMON_COUNT ((int)(sizeof(common_colors) / sizeof(common_colors[0])))
 
 static bool menu_open = false;
-static int tab = 0; /* 0 = common, 1 = custom */
-static u64 start_hold_start = 0;
+static int active_tab = 0; /* 0 = common, 1 = custom */
 static bool start_was_held = false;
+static u64 start_hold_time = 0;
 
 static u16 rgb565(u8 r, u8 g, u8 b)
 {
@@ -50,10 +57,10 @@ static u16 rgb565(u8 r, u8 g, u8 b)
 }
 
 /*
- * Fill the complete physical framebuffer.
+ * Get the actual framebuffer and fill every pixel in it.
  *
- * 3DS framebuffers are stored rotated, with 240 pixels between columns.
- * The top screen is 400x240 and the bottom screen is 320x240.
+ * libctru exposes the 3DS framebuffer rotated in memory. The correct
+ * address for a logical (x,y) pixel is x * 240 + (239 - y).
  */
 static void fill_screen(gfxScreen_t screen, u16 color)
 {
@@ -61,117 +68,109 @@ static void fill_screen(gfxScreen_t screen, u16 color)
     u16 height = 0;
     u16 *fb = (u16 *)gfxGetFramebuffer(screen, GFX_LEFT, &width, &height);
 
-    if (!fb)
-        return;
-
-    /* Use the dimensions supplied by libctru, but keep the known stride. */
-    if (height != SCREEN_HEIGHT)
+    if (fb == NULL || height != SCREEN_H)
         return;
 
     for (u16 x = 0; x < width; ++x) {
         for (u16 y = 0; y < height; ++y) {
-            fb[(u32)x * FB_STRIDE + (SCREEN_HEIGHT - 1 - y)] = color;
+            fb[(u32)x * FB_STRIDE + (SCREEN_H - 1 - y)] = color;
         }
     }
 }
 
-static void bottom_rect(int x, int y, int width, int height, u16 color)
+static void fill_bottom_rect(int x, int y, int w, int h, u16 color)
 {
-    u16 fb_width = 0;
-    u16 fb_height = 0;
-    u16 *fb = (u16 *)gfxGetFramebuffer(
-        GFX_BOTTOM, GFX_LEFT, &fb_width, &fb_height
-    );
+    u16 width = 0;
+    u16 height = 0;
+    u16 *fb = (u16 *)gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &width, &height);
 
-    if (!fb)
+    if (fb == NULL || height != SCREEN_H)
         return;
 
-    /* Clip against the actual bottom-screen dimensions. */
+    /* Clip to the real bottom framebuffer. */
     if (x < 0) {
-        width += x;
+        w += x;
         x = 0;
     }
     if (y < 0) {
-        height += y;
+        h += y;
         y = 0;
     }
-    if (x + width > (int)fb_width)
-        width = (int)fb_width - x;
-    if (y + height > (int)fb_height)
-        height = (int)fb_height - y;
+    if (x + w > (int)width)
+        w = (int)width - x;
+    if (y + h > (int)height)
+        h = (int)height - y;
 
-    if (width <= 0 || height <= 0)
+    if (w <= 0 || h <= 0)
         return;
 
-    for (int px = x; px < x + width; ++px) {
-        for (int py = y; py < y + height; ++py) {
-            fb[(u32)px * FB_STRIDE + (SCREEN_HEIGHT - 1 - py)] = color;
+    for (int px = x; px < x + w; ++px) {
+        for (int py = y; py < y + h; ++py) {
+            fb[(u32)px * FB_STRIDE + (SCREEN_H - 1 - py)] = color;
         }
     }
 }
 
-static void bottom_outline(int x, int y, int width, int height, u16 color)
+static void draw_bottom_outline(int x, int y, int w, int h, u16 color)
 {
-    bottom_rect(x, y, width, 2, color);
-    bottom_rect(x, y + height - 2, width, 2, color);
-    bottom_rect(x, y, 2, height, color);
-    bottom_rect(x + width - 2, y, 2, height, color);
+    fill_bottom_rect(x, y, w, 2, color);
+    fill_bottom_rect(x, y + h - 2, w, 2, color);
+    fill_bottom_rect(x, y, 2, h, color);
+    fill_bottom_rect(x + w - 2, y, 2, h, color);
 }
 
-static void center_text(const char *text, int row, int width_chars)
+static void print_centered(const char *text, int row, int columns)
 {
-    int len = (int)strlen(text);
-    int col = ((width_chars - len) / 2) + 1;
+    int length = (int)strlen(text);
+    int column = ((columns - length) / 2) + 1;
 
-    if (col < 1)
-        col = 1;
+    if (column < 1)
+        column = 1;
 
-    printf("\x1b[%d;%dH%s", row, col, text);
+    printf("\x1b[%d;%dH%s", row, column, text);
 }
 
 static void draw_menu(void)
 {
-    const u16 panel = rgb565(28, 28, 34);
-    const u16 panel2 = rgb565(48, 48, 56);
-    const u16 border = rgb565(150, 150, 160);
-    const u16 text = rgb565(255, 255, 255);
-    const u16 selected_tab = rgb565(65, 95, 165);
-    const u16 close_color = rgb565(85, 45, 50);
+    const u16 background = rgb565(25, 25, 30);
+    const u16 panel = rgb565(40, 40, 48);
+    const u16 inactive_tab = rgb565(58, 58, 68);
+    const u16 active_tab = rgb565(70, 100, 175);
+    const u16 border = rgb565(170, 170, 180);
+    const u16 white = rgb565(255, 255, 255);
+    const u16 close_color = rgb565(100, 45, 50);
 
-    /*
-     * consoleClear() clears the entire bottom framebuffer. Do it first,
-     * then draw every pixel of the menu ourselves so no old frame remains.
-     */
+    /* Start from a known framebuffer state every frame. */
     consoleClear();
+    fill_bottom_rect(0, 0, BOT_W, SCREEN_H, background);
 
-    /* Full-width menu background: no half-screen/old-color area. */
-    bottom_rect(0, 0, BOT_WIDTH, SCREEN_HEIGHT, panel);
-
-    /* Main panel with a small margin. */
-    bottom_rect(4, 4, 312, 232, panel);
-    bottom_outline(4, 4, 312, 232, border);
+    /* Main menu panel. */
+    fill_bottom_rect(MENU_X, MENU_Y, MENU_W, MENU_H, panel);
+    draw_bottom_outline(MENU_X, MENU_Y, MENU_W, MENU_H, border);
 
     /* Tabs. */
-    bottom_rect(10, 10, 145, 28, tab == 0 ? selected_tab : panel2);
-    bottom_rect(165, 10, 145, 28, tab == 1 ? selected_tab : panel2);
-    bottom_outline(10, 10, 145, 28, border);
-    bottom_outline(165, 10, 145, 28, border);
+    fill_bottom_rect(10, 10, 145, 28,
+        active_tab == 0 ? active_tab : inactive_tab);
+    fill_bottom_rect(165, 10, 145, 28,
+        active_tab == 1 ? active_tab : inactive_tab);
+    draw_bottom_outline(10, 10, 145, 28, border);
+    draw_bottom_outline(165, 10, 145, 28, border);
 
-    /* Common-color grid. */
-    if (tab == 0) {
+    if (active_tab == 0) {
+        /* Four columns by three rows of large touch targets. */
         const int x0 = 12;
         const int y0 = 46;
         const int cell_w = 70;
         const int cell_h = 43;
         const int gap = 4;
 
-        for (int i = 0; i < (int)COMMON_COUNT; ++i) {
-            int column = i % 4;
-            int row = i / 4;
-            int x = x0 + column * (cell_w + gap);
-            int y = y0 + row * (cell_h + gap);
+        for (int i = 0; i < COMMON_COUNT; ++i) {
+            const int col = i % 4;
+            const int row = i / 4;
+            const int x = x0 + col * (cell_w + gap);
+            const int y = y0 + row * (cell_h + gap);
 
-            bottom_rect(
+            fill_bottom_rect(
                 x, y, cell_w, cell_h,
                 rgb565(
                     common_colors[i].r,
@@ -179,35 +178,36 @@ static void draw_menu(void)
                     common_colors[i].b
                 )
             );
-            bottom_outline(x, y, cell_w, cell_h, text);
+            draw_bottom_outline(x, y, cell_w, cell_h, white);
         }
     } else {
-        /* Custom-color page. */
-        center_text("CUSTOM COLOR", 7, 40);
-        center_text("Tap this tab to enter HEX", 9, 40);
-        center_text("Format: #RRGGBB", 11, 40);
-        center_text("Example: #00FF80", 13, 40);
+        print_centered("CUSTOM COLOR", 7, 40);
+        print_centered("Tap the tab to enter a HEX color", 9, 40);
+        print_centered("Format: #RRGGBB", 11, 40);
+        print_centered("Example: #00FF80", 13, 40);
     }
 
-    /* Close button. */
-    bottom_rect(10, 198, 300, 28, close_color);
-    bottom_outline(10, 198, 300, 28, border);
+    /* Close is always in the same place. */
+    fill_bottom_rect(10, 198, 300, 28, close_color);
+    draw_bottom_outline(10, 198, 300, 28, border);
 
-    /* Console text is drawn after the framebuffer graphics. */
+    /* Text is drawn last so the graphics do not cover it. */
     printf("\x1b[2;3HCOMMON COLORS");
     printf("\x1b[2;23HCUSTOM COLOR");
-    center_text("CLOSE  (B)", 26, 40);
+    print_centered("CLOSE  (B)", 26, 40);
 }
 
 static void draw_frame(void)
 {
-    u16 color = rgb565(current_color.r, current_color.g, current_color.b);
+    const u16 color = rgb565(current_color.r, current_color.g, current_color.b);
 
-    /* The application itself is always the selected solid color. */
+    /*
+     * No tinting or overlay: both screens are literally filled with the
+     * selected RGB color while the app is in its normal state.
+     */
     fill_screen(GFX_TOP, color);
     fill_screen(GFX_BOTTOM, color);
 
-    /* The menu is the only exception, and only while it is open. */
     if (menu_open)
         draw_menu();
 }
@@ -218,66 +218,68 @@ static bool hex_digit(char c, u8 *value)
         *value = (u8)(c - '0');
         return true;
     }
+
     if (c >= 'a' && c <= 'f') {
         *value = (u8)(c - 'a' + 10);
         return true;
     }
+
     if (c >= 'A' && c <= 'F') {
         *value = (u8)(c - 'A' + 10);
         return true;
     }
+
     return false;
 }
 
-static bool parse_hex(const char *input, Color *out)
+static bool parse_hex_color(const char *input, Color *result)
 {
-    size_t len = strlen(input);
-    const char *p = input;
+    const char *digits = input;
+    size_t length = strlen(input);
 
-    if (len == 7 && input[0] == '#') {
-        p = input + 1;
-    } else if (len != 6) {
+    if (length == 7 && input[0] == '#') {
+        digits = input + 1;
+    } else if (length != 6) {
         return false;
     }
 
-    if (strlen(p) != 6)
-        return false;
+    u8 value[6];
 
-    u8 d[6];
     for (int i = 0; i < 6; ++i) {
-        if (!hex_digit(p[i], &d[i]))
+        if (!hex_digit(digits[i], &value[i]))
             return false;
     }
 
-    out->r = (u8)((d[0] << 4) | d[1]);
-    out->g = (u8)((d[2] << 4) | d[3]);
-    out->b = (u8)((d[4] << 4) | d[5]);
-    out->name = "Custom";
+    result->r = (u8)((value[0] << 4) | value[1]);
+    result->g = (u8)((value[2] << 4) | value[3]);
+    result->b = (u8)((value[4] << 4) | value[5]);
+    result->name = "Custom";
+
     return true;
 }
 
-static void custom_color_keyboard(void)
+static void enter_custom_color(void)
 {
-    SwkbdState swkbd;
-    swkbdInit(&swkbd, SWKBD_TYPE_WESTERN, 2, 7);
-    swkbdSetHintText(&swkbd, "#RRGGBB");
-    swkbdSetValidation(&swkbd, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
-
+    SwkbdState keyboard;
     char input[8] = {0};
-    SwkbdButton button = swkbdInputText(&swkbd, input, sizeof(input));
 
-    if (button != SWKBD_BUTTON_CONFIRM)
+    swkbdInit(&keyboard, SWKBD_TYPE_WESTERN, 2, 7);
+    swkbdSetHintText(&keyboard, "#RRGGBB");
+    swkbdSetValidation(&keyboard, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+
+    if (swkbdInputText(&keyboard, input, sizeof(input)) != SWKBD_BUTTON_CONFIRM)
         return;
 
-    Color parsed;
-    if (parse_hex(input, &parsed))
-        current_color = parsed;
+    Color new_color;
+
+    if (parse_hex_color(input, &new_color))
+        current_color = new_color;
 }
 
 static void open_menu(void)
 {
     menu_open = true;
-    tab = 0;
+    active_tab = 0;
 }
 
 static void handle_touch(void)
@@ -285,49 +287,50 @@ static void handle_touch(void)
     touchPosition touch;
     hidTouchRead(&touch);
 
-    int x = touch.px;
-    int y = touch.py;
+    const int x = touch.px;
+    const int y = touch.py;
 
-    /* Tabs. */
-    if (y >= 10 && y < 38) {
-        if (x >= 10 && x < 155) {
-            tab = 0;
-            return;
-        }
-
-        if (x >= 165 && x < 310) {
-            tab = 1;
-            custom_color_keyboard();
-            return;
-        }
+    /* Common-colors tab. */
+    if (x >= 10 && x < 155 && y >= 10 && y < 38) {
+        active_tab = 0;
+        return;
     }
 
-    /* Common colors. */
-    if (tab == 0 && x >= 12 && x < 304 && y >= 46 && y < 187) {
+    /* Custom-color tab. */
+    if (x >= 165 && x < 310 && y >= 10 && y < 38) {
+        active_tab = 1;
+        enter_custom_color();
+        return;
+    }
+
+    /* Common color grid. */
+    if (active_tab == 0 && x >= 12 && x < 304 && y >= 46 && y < 187) {
+        const int x0 = 12;
+        const int y0 = 46;
         const int cell_w = 70;
         const int cell_h = 43;
         const int gap = 4;
 
-        int column = (x - 12) / (cell_w + gap);
-        int row = (y - 46) / (cell_h + gap);
-        int local_x = (x - 12) % (cell_w + gap);
-        int local_y = (y - 46) % (cell_h + gap);
+        const int col = (x - x0) / (cell_w + gap);
+        const int row = (y - y0) / (cell_h + gap);
+        const int local_x = (x - x0) % (cell_w + gap);
+        const int local_y = (y - y0) % (cell_h + gap);
 
-        /* Ignore the gaps between cells. */
-        if (column >= 0 && column < 4 &&
-            row >= 0 && row < 3 &&
+        /* Touching the gap does nothing. */
+        if (col >= 0 && col < 4 && row >= 0 && row < 3 &&
             local_x < cell_w && local_y < cell_h) {
-            int index = row * 4 + column;
-            if (index < (int)COMMON_COUNT)
+            const int index = row * 4 + col;
+
+            if (index < COMMON_COUNT)
                 current_color = common_colors[index];
         }
+
         return;
     }
 
-    /* Close. */
-    if (x >= 10 && x < 310 && y >= 198 && y < 226) {
+    /* Close button. */
+    if (x >= 10 && x < 310 && y >= 198 && y < 226)
         menu_open = false;
-    }
 }
 
 int main(int argc, char **argv)
@@ -341,10 +344,10 @@ int main(int argc, char **argv)
     while (aptMainLoop()) {
         hidScanInput();
 
-        u32 down = hidKeysDown();
-        u32 held = hidKeysHeld();
+        const u32 down = hidKeysDown();
+        const u32 held = hidKeysHeld();
 
-        /* B closes the menu. B at the app root exits normally. */
+        /* B closes the menu, or exits the app if no menu is open. */
         if (down & KEY_B) {
             if (menu_open)
                 menu_open = false;
@@ -355,12 +358,13 @@ int main(int argc, char **argv)
         if (menu_open && (down & KEY_TOUCH))
             handle_touch();
 
-        /* START must be held for one full second. */
+        /* Open the menu after START has been held continuously for 1 second. */
         if (held & KEY_START) {
             if (!start_was_held) {
-                start_hold_start = osGetTime();
+                start_hold_time = osGetTime();
                 start_was_held = true;
-            } else if (!menu_open && osGetTime() - start_hold_start >= 1000) {
+            } else if (!menu_open &&
+                       osGetTime() - start_hold_time >= START_HOLD_MS) {
                 open_menu();
             }
         } else {
