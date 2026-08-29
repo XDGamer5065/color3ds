@@ -7,38 +7,38 @@ $(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to dev
 endif
 
 TOPDIR ?= $(CURDIR)
+
 include $(DEVKITARM)/3ds_rules
 
 #---------------------------------------------------------------------------------
 # Project settings
 #---------------------------------------------------------------------------------
 
-TARGET := ScreenColorChanger
-BUILD := build
-SOURCES := source
+TARGET      := ScreenColorChanger
+BUILD       := build
+SOURCES     := source
 
-APP_TITLE := 3DS Screen Color Changer
+APP_TITLE       := 3DS Screen Color Changer
 APP_DESCRIPTION := Solid-color screen utility with a touch menu
-APP_AUTHOR := XDGamer5065
+APP_AUTHOR      := XDGamer5065
 
 #---------------------------------------------------------------------------------
-# Compiler settings
+# Compiler flags
 #---------------------------------------------------------------------------------
 
-ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard
+CFLAGS   := -g -Wall -O2 -mword-relocations \
+            -ffunction-sections -fdata-sections
 
-CFLAGS := -g -Wall -O2 -mword-relocations \
-          -ffunction-sections -fdata-sections \
-          $(ARCH)
-
-CFLAGS += $(INCLUDE) -D__3DS__
+CFLAGS  += $(INCLUDE)
 
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
-ASFLAGS := -g $(ARCH)
-LDFLAGS := -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+ASFLAGS  := -g
 
-LIBS := -lctru -lm
-LIBDIRS := $(CTRULIB)
+LDFLAGS  := -specs=3dsx.specs -g \
+            -Wl,-Map,$(notdir $*.map)
+
+LIBS     := -lctru -lm
+LIBDIRS  := $(CTRULIB)
 
 #---------------------------------------------------------------------------------
 # Build system
@@ -47,13 +47,14 @@ LIBDIRS := $(CTRULIB)
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 
 export OUTPUT := $(CURDIR)/$(TARGET)
-export TOPDIR := $(CURDIR)
-export VPATH := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
+export TOPDIR  := $(CURDIR)
+
+export VPATH   := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
 export DEPSDIR := $(CURDIR)/$(BUILD)
 
-CFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
-SFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+SFILES   := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 
 .PHONY: all clean
 
@@ -65,15 +66,19 @@ $(BUILD):
 
 clean:
 	@echo "Cleaning..."
-	@rm -rf $(BUILD) $(TARGET).3dsx $(TARGET).elf
+	@rm -rf $(BUILD)
+	@rm -f $(TARGET).3dsx
+	@rm -f $(TARGET).elf
 
 else
 
-DEPENDS := $(CFILES:.c=.d) $(CPPFILES:.cpp=.d) $(SFILES:.s=.d)
+DEPENDS := $(CFILES:.c=.d) \
+           $(CPPFILES:.cpp=.d) \
+           $(SFILES:.s=.d)
 
-CFILES := $(addprefix $(BUILD)/,$(CFILES:.c=.o))
+CFILES   := $(addprefix $(BUILD)/,$(CFILES:.c=.o))
 CPPFILES := $(addprefix $(BUILD)/,$(CPPFILES:.cpp=.o))
-SFILES := $(addprefix $(BUILD)/,$(SFILES:.s=.o))
+SFILES   := $(addprefix $(BUILD)/,$(SFILES:.s=.o))
 
 .PHONY: all clean
 
@@ -87,4 +92,6 @@ $(OUTPUT).elf: $(CFILES) $(CPPFILES) $(SFILES)
 
 endif
 
+#---------------------------------------------------------------------------------
 include $(DEVKITARM)/base_rules
+#---------------------------------------------------------------------------------
