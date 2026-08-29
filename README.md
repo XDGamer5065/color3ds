@@ -1,5 +1,7 @@
 # 3DS Screen Color Changer
 
+> ⚠️ **Warning:** This project is vibecoded / made with AI. It may contain bugs, weird code, or unexpected behavior. Use it at your own discretion.
+
 A simple Nintendo 3DS homebrew app that lets you change the color displayed on the 3DS screens.
 
 ## Features
