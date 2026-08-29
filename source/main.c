@@ -31,6 +31,7 @@ static int tab=0;
 static bool start_held=false, select_held=false;
 static u64 start_tick=0, select_tick=0;
 static int pressed_button=NO_BUTTON;
+static Target pressed_target=TARGET_BOTH;
 
 static Frame frame_get(gfxScreen_t screen)
 {
@@ -193,7 +194,6 @@ static void draw_menu(const Frame *f)
     clear_frame(f,bottom_color);
     rounded_rect(f,8,8,304,224,12,panel);
 
-    /* Smaller tabs with a real gap between them. */
     Color common_bg=(tab==0)?selected:inactive;
     Color custom_bg=(tab==1)?selected:inactive;
     if(pressed_button==BTN_TAB_COMMON) common_bg=darken(common_bg);
@@ -263,9 +263,8 @@ static int hit_test(int x,int y)
     return NO_BUTTON;
 }
 
-static void activate_button(int button,u32 held)
+static void activate_button(int button,Target target)
 {
-    Target target=input_target(held);
     if(button==BTN_TAB_COMMON) tab=0;
     else if(button==BTN_TAB_CUSTOM) tab=1;
     else if(button==BTN_CLOSE) menu_open=false;
@@ -273,32 +272,36 @@ static void activate_button(int button,u32 held)
     else if(button==BTN_HEX) keyboard(target);
 }
 
-/* Buttons now use press-and-release semantics: press inside, keep holding,
-   then release while still inside the same button. */
 static void update_touch(u32 down,u32 held)
 {
-    touchPosition t;
     bool touching=(held&KEY_TOUCH)!=0;
+    touchPosition t;
 
+    /* Start a press only when the stylus goes down. */
     if(down&KEY_TOUCH) {
         hidTouchRead(&t);
         pressed_button=hit_test((int)t.px,(int)t.py);
+        pressed_target=input_target(held);
+        return;
     }
 
+    if(pressed_button==NO_BUTTON) return;
+
     if(touching) {
-        if(pressed_button!=NO_BUTTON) {
-            hidTouchRead(&t);
-            if(hit_test((int)t.px,(int)t.py)!=pressed_button) pressed_button=NO_BUTTON;
-        }
-    } else if(pressed_button!=NO_BUTTON) {
-        /* KEY_TOUCH just released. Re-read the final position and activate
-           only if the stylus was released over the original button. */
         hidTouchRead(&t);
-        int button=hit_test((int)t.px,(int)t.py);
-        int pressed=pressed_button;
-        pressed_button=NO_BUTTON;
-        if(button==pressed) activate_button(pressed,held);
+        /* Leaving the button cancels the press, so the release won't fire. */
+        if(hit_test((int)t.px,(int)t.py)!=pressed_button)
+            pressed_button=NO_BUTTON;
+        return;
     }
+
+    /* Stylus was released. Since KEY_TOUCH is no longer held, hidTouchRead
+       is not guaranteed to contain the last touch position. The press was
+       already validated while held; activate it here. */
+    int button=pressed_button;
+    Target target=pressed_target;
+    pressed_button=NO_BUTTON;
+    activate_button(button,target);
 }
 
 int main(void)
@@ -313,13 +316,19 @@ int main(void)
 
         if(held_one_second(held&KEY_SELECT,&select_held,&select_tick)) break;
 
-        if(!menu_open&&held_one_second(held&KEY_START,&start_held,&start_tick)) {
-            menu_open=true; tab=0; pressed_button=NO_BUTTON; start_held=false;
+        if(!menu_open && held_one_second(held&KEY_START,&start_held,&start_tick)) {
+            menu_open=true;
+            tab=0;
+            start_held=false;
         }
 
         if(menu_open) {
-            if(down&KEY_B) { menu_open=false; pressed_button=NO_BUTTON; }
-            else update_touch(down,held);
+            if(down&KEY_B) {
+                menu_open=false;
+                pressed_button=NO_BUTTON;
+            } else {
+                update_touch(down,held);
+            }
         } else {
             pressed_button=NO_BUTTON;
         }
