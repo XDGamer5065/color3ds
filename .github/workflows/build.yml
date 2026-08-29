@@ -1,4 +1,3 @@
-```yaml
 name: Build 3DS app
 
 on:
@@ -34,4 +33,4 @@ jobs:
           name: screen-color-changer-3dsx
           path: ScreenColorChanger.3dsx
           if-no-files-found: error
-```
+
