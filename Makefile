@@ -1,3 +1,4 @@
+```make
 #---------------------------------------------------------------------------------
 .SUFFIXES:
 #---------------------------------------------------------------------------------
@@ -35,7 +36,8 @@ CFLAGS += $(INCLUDE) -D__3DS__
 
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS := -g $(ARCH)
-LDFLAGS = -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+LDFLAGS := -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
+
 LIBS := -lctru -lm
 LIBDIRS := $(CTRULIB)
 
@@ -53,6 +55,18 @@ export DEPSDIR := $(CURDIR)/$(BUILD)
 CFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
 SFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+
+.PHONY: all clean
+
+all: $(BUILD)
+	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
+
+$(BUILD):
+	@mkdir -p $@
+
+clean:
+	@echo "Cleaning..."
+	@rm -rf $(BUILD) $(TARGET).3dsx $(TARGET).elf
 
 else
 
@@ -75,3 +89,4 @@ $(OUTPUT).elf: $(CFILES) $(CPPFILES) $(SFILES)
 endif
 
 include $(DEVKITARM)/base_rules
+```
