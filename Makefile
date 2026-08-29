@@ -1,8 +1,12 @@
 #---------------------------------------------------------------------------------
-# 3DS application Makefile
+# 3DS Screen Color Changer - Makefile
 #---------------------------------------------------------------------------------
 
 .SUFFIXES:
+
+#---------------------------------------------------------------------------------
+# Environment
+#---------------------------------------------------------------------------------
 
 ifeq ($(strip $(DEVKITARM)),)
 $(error "Please set DEVKITARM in your environment. export DEVKITARM=<path to devkitARM>")
@@ -17,7 +21,6 @@ include $(DEVKITARM)/3ds_rules
 #---------------------------------------------------------------------------------
 
 TARGET := ScreenColorChanger
-
 BUILD := build
 SOURCES := source
 
@@ -41,46 +44,82 @@ CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS := -g $(ARCH)
 
-LDFLAGS := -specs=3dsx.specs -g $(ARCH)
-
 LIBS := -lctru -lm
 
 LIBDIRS := $(CTRULIB)
 
 #---------------------------------------------------------------------------------
-# Build system
+# Build configuration
 #---------------------------------------------------------------------------------
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
 
+#---------------------------------------------------------------------------------
+# Source files
+#---------------------------------------------------------------------------------
+
 export OUTPUT := $(CURDIR)/$(TARGET)
 export TOPDIR := $(CURDIR)
 
-export VPATH := $(CURDIR)/$(SOURCES)
-
+export VPATH := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
 export DEPSDIR := $(CURDIR)/$(BUILD)
 
-CFILES := $(notdir $(wildcard $(SOURCES)/*.c))
-CPPFILES := $(notdir $(wildcard $(SOURCES)/*.cpp))
-SFILES := $(notdir $(wildcard $(SOURCES)/*.s))
+CFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
+CPPFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+SFILES := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
 
-export OFILES := $(CFILES:.c=.o) \
-                 $(CPPFILES:.cpp=.o) \
-                 $(SFILES:.s=.o)
+#---------------------------------------------------------------------------------
+# Object files
+#---------------------------------------------------------------------------------
 
-export INCLUDE := $(foreach dir,$(INCLUDES),-I$(CURDIR)/$(dir)) \
-                  $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
-                  -I$(CURDIR)/$(BUILD)
+export OFILES_SOURCES := \
+    $(CPPFILES:.cpp=.o) \
+    $(CFILES:.c=.o) \
+    $(SFILES:.s=.o)
 
-export LIBPATHS := $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+export OFILES := $(OFILES_SOURCES)
+
+#---------------------------------------------------------------------------------
+# Include and library paths
+#---------------------------------------------------------------------------------
+
+export INCLUDE := \
+    $(foreach dir,$(LIBDIRS),-I$(dir)/include) \
+    -I$(CURDIR)/$(BUILD)
+
+export LIBPATHS := \
+    $(foreach dir,$(LIBDIRS),-L$(dir)/lib)
+
+#---------------------------------------------------------------------------------
+# SMDH / 3DSX settings
+#---------------------------------------------------------------------------------
+
+export _3DSXDEPS := $(OUTPUT).smdh
+
+export _3DSXFLAGS += --smdh=$(OUTPUT).smdh
+
+#---------------------------------------------------------------------------------
+# Main build
+#---------------------------------------------------------------------------------
 
 .PHONY: all clean
 
-all:
+all: $(BUILD) $(DEPSDIR)
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
+#---------------------------------------------------------------------------------
+# Create build directories
+#---------------------------------------------------------------------------------
+
 $(BUILD):
-	@mkdir -p $(BUILD)
+	@mkdir -p $@
+
+$(DEPSDIR):
+	@mkdir -p $@
+
+#---------------------------------------------------------------------------------
+# Clean
+#---------------------------------------------------------------------------------
 
 clean:
 	@echo "Cleaning..."
@@ -91,16 +130,26 @@ clean:
 
 else
 
-DEPENDS := $(OFILES:.o=.d)
+#---------------------------------------------------------------------------------
+# Build inside build/
+#---------------------------------------------------------------------------------
 
-$(OUTPUT).3dsx: $(OUTPUT).elf
+DEPENDS := $(OFILES_SOURCES:.o=.d)
+
+.PHONY: all
+
+all: $(OUTPUT).3dsx
+
+$(OUTPUT).3dsx: $(OUTPUT).elf $(_3DSXDEPS)
 
 $(OUTPUT).elf: $(OFILES)
 
--include $(DEPENDS)
+-include $(DEPSDIR)/*.d
 
 endif
 
+#---------------------------------------------------------------------------------
+# Standard devkitPro rules
 #---------------------------------------------------------------------------------
 
 include $(DEVKITARM)/base_rules
