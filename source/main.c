@@ -5,334 +5,300 @@
 
 typedef struct { u8 r, g, b; } Color;
 typedef enum { TARGET_BOTH, TARGET_TOP, TARGET_BOTTOM } Target;
+typedef struct { u8 *data; int width; int height; } Frame;
 
-typedef struct {
-    u8 *data;
-    int width;
-    int height;
-} Frame;
-
-#define FB_STRIDE 240
-#define FB_BPP 3
-#define TOP_WIDTH 400
-#define BOTTOM_WIDTH 320
-#define SCREEN_HEIGHT 240
+enum { FB_STRIDE = 240, FB_BPP = 3, TOP_WIDTH = 400, BOTTOM_WIDTH = 320, SCREEN_HEIGHT = 240 };
 #define HOLD_TICKS 268000000ULL
+#define NO_BUTTON (-1)
+#define BTN_TAB_COMMON 0
+#define BTN_TAB_CUSTOM 1
+#define BTN_CLOSE 2
+#define BTN_HEX 3
+#define BTN_COLOR_BASE 10
 
 static const Color common_colors[] = {
-    {255,0,0}, {0,255,0}, {0,0,255}, {255,255,0},
-    {255,0,255}, {0,255,255}, {255,255,255}, {0,0,0},
-    {128,128,128}, {255,128,0}, {128,0,255}, {0,128,255}
+    {255,0,0},{0,255,0},{0,0,255},{255,255,0},
+    {255,0,255},{0,255,255},{255,255,255},{0,0,0},
+    {128,128,128},{255,128,0},{128,0,255},{0,128,255}
 };
-#define COMMON_COUNT ((int)(sizeof(common_colors) / sizeof(common_colors[0])))
+#define COMMON_COUNT ((int)(sizeof(common_colors)/sizeof(common_colors[0])))
 
-static Color top_color = {0,255,0};
-static Color bottom_color = {0,255,0};
-static Color custom_color = {0,255,0};
+static Color top_color={0,255,0};
+static Color bottom_color={0,255,0};
+static Color custom_color={0,255,0};
+static bool menu_open=false;
+static int tab=0;
+static bool start_held=false, select_held=false;
+static u64 start_tick=0, select_tick=0;
+static int pressed_button=NO_BUTTON;
 
-static bool menu_open = false;
-static int tab = 0;
-static bool start_held = false;
-static bool select_held = false;
-static u64 start_tick = 0;
-static u64 select_tick = 0;
-
-/*
- * 3DS framebuffers use 24-bit BGR pixels and are stored rotated.
- * The physical framebuffer dimensions reported by gfxGetFramebuffer()
- * are 240x400 for the top screen and 240x320 for the bottom screen.
- * For drawing, however, we use the logical dimensions of 400x240 and
- * 320x240. Logical (x,y) maps to x * 240 + (239-y).
- */
 static Frame frame_get(gfxScreen_t screen)
 {
     Frame f;
-    u16 physical_w = 0, physical_h = 0;
-
-    f.data = gfxGetFramebuffer(screen, GFX_LEFT, &physical_w, &physical_h);
-
-    (void)physical_w;
-    (void)physical_h;
-
-    if (screen == GFX_TOP) {
-        f.width = TOP_WIDTH;
-        f.height = SCREEN_HEIGHT;
-    } else {
-        f.width = BOTTOM_WIDTH;
-        f.height = SCREEN_HEIGHT;
-    }
-
+    u16 pw=0, ph=0;
+    f.data=(u8*)gfxGetFramebuffer(screen,GFX_LEFT,&pw,&ph);
+    f.width=(screen==GFX_TOP)?TOP_WIDTH:BOTTOM_WIDTH;
+    f.height=SCREEN_HEIGHT;
     return f;
 }
 
 static inline bool frame_ok(const Frame *f)
 {
-    return f && f->data && f->width > 0 && f->height > 0;
+    return f && f->data && f->width>0 && f->height>0;
 }
 
-static inline u8 *frame_pixel(const Frame *f, int x, int y)
+static inline u8 *pixel(const Frame *f,int x,int y)
 {
-    return f->data + ((x * FB_STRIDE) + (SCREEN_HEIGHT - 1 - y)) * FB_BPP;
+    return f->data+((x*FB_STRIDE)+(SCREEN_HEIGHT-1-y))*FB_BPP;
 }
 
-static inline void put_pixel(const Frame *f, int x, int y, Color c)
+static inline void put_pixel(const Frame *f,int x,int y,Color c)
 {
-    if (!frame_ok(f) || x < 0 || y < 0 || x >= f->width || y >= f->height)
-        return;
-
-    u8 *p = frame_pixel(f, x, y);
-    p[0] = c.b;
-    p[1] = c.g;
-    p[2] = c.r;
+    if(!frame_ok(f)||x<0||y<0||x>=f->width||y>=f->height) return;
+    u8 *p=pixel(f,x,y);
+    p[0]=c.b; p[1]=c.g; p[2]=c.r;
 }
 
-static void clear_frame(const Frame *f, Color c)
+static void clear_frame(const Frame *f,Color c)
 {
-    if (!frame_ok(f)) return;
-
-    for (int x = 0; x < f->width; ++x) {
-        u8 *p = f->data + x * FB_STRIDE * FB_BPP;
-        for (int y = 0; y < f->height; ++y) {
-            u8 *q = p + (SCREEN_HEIGHT - 1 - y) * FB_BPP;
-            q[0] = c.b;
-            q[1] = c.g;
-            q[2] = c.r;
+    if(!frame_ok(f)) return;
+    for(int x=0;x<f->width;x++) {
+        u8 *base=f->data+x*FB_STRIDE*FB_BPP;
+        for(int y=0;y<f->height;y++) {
+            u8 *p=base+(SCREEN_HEIGHT-1-y)*FB_BPP;
+            p[0]=c.b; p[1]=c.g; p[2]=c.r;
         }
     }
 }
 
-static void fill_rect(const Frame *f, int x, int y, int w, int h, Color c)
+static void fill_rect(const Frame *f,int x,int y,int w,int h,Color c)
 {
-    if (!frame_ok(f) || w <= 0 || h <= 0) return;
-
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > f->width) w = f->width - x;
-    if (y + h > f->height) h = f->height - y;
-    if (w <= 0 || h <= 0) return;
-
-    for (int px = x; px < x + w; ++px) {
-        u8 *base = f->data + px * FB_STRIDE * FB_BPP;
-        for (int py = y; py < y + h; ++py) {
-            u8 *p = base + (SCREEN_HEIGHT - 1 - py) * FB_BPP;
-            p[0] = c.b;
-            p[1] = c.g;
-            p[2] = c.r;
+    if(!frame_ok(f)||w<=0||h<=0) return;
+    if(x<0){w+=x;x=0;} if(y<0){h+=y;y=0;}
+    if(x+w>f->width) w=f->width-x;
+    if(y+h>f->height) h=f->height-y;
+    if(w<=0||h<=0) return;
+    for(int px=x;px<x+w;px++) {
+        u8 *base=f->data+px*FB_STRIDE*FB_BPP;
+        for(int py=y;py<y+h;py++) {
+            u8 *p=base+(SCREEN_HEIGHT-1-py)*FB_BPP;
+            p[0]=c.b; p[1]=c.g; p[2]=c.r;
         }
     }
 }
 
-static void circle(const Frame *f, int cx, int cy, int r, Color c)
+static void circle(const Frame *f,int cx,int cy,int r,Color c)
 {
-    for (int y = -r; y <= r; ++y)
-        for (int x = -r; x <= r; ++x)
-            if (x*x + y*y <= r*r)
-                put_pixel(f, cx+x, cy+y, c);
+    for(int y=-r;y<=r;y++) for(int x=-r;x<=r;x++)
+        if(x*x+y*y<=r*r) put_pixel(f,cx+x,cy+y,c);
 }
 
-static void rounded_rect(const Frame *f, int x, int y, int w, int h, int r, Color c)
+static void rounded_rect(const Frame *f,int x,int y,int w,int h,int r,Color c)
 {
-    if (r <= 0) { fill_rect(f,x,y,w,h,c); return; }
-    if (r * 2 > w) r = w / 2;
-    if (r * 2 > h) r = h / 2;
-
-    fill_rect(f, x+r, y, w-2*r, h, c);
-    fill_rect(f, x, y+r, w, h-2*r, c);
-    circle(f, x+r, y+r, r, c);
-    circle(f, x+w-r-1, y+r, r, c);
-    circle(f, x+r, y+h-r-1, r, c);
-    circle(f, x+w-r-1, y+h-r-1, r, c);
+    if(r<=0){fill_rect(f,x,y,w,h,c);return;}
+    if(r*2>w) r=w/2; if(r*2>h) r=h/2;
+    fill_rect(f,x+r,y,w-2*r,h,c);
+    fill_rect(f,x,y+r,w,h-2*r,c);
+    circle(f,x+r,y+r,r,c); circle(f,x+w-r-1,y+r,r,c);
+    circle(f,x+r,y+h-r-1,r,c); circle(f,x+w-r-1,y+h-r-1,r,c);
 }
 
 typedef struct { char c; u8 rows[7]; } Glyph;
 #define G(c,a,b,d,e,f,g,h) {c,{a,b,d,e,f,g,h}}
-static const Glyph font[] = {
-    G(' ',0,0,0,0,0,0,0), G('#',10,31,10,10,31,10,0),
-    G('.',0,0,0,0,0,6,6), G(':',0,6,6,0,6,6,0), G('-',0,0,0,31,0,0,0),
-    G('0',14,17,19,21,25,17,14), G('1',4,12,4,4,4,4,14),
-    G('2',14,17,1,2,4,8,31), G('3',30,1,1,14,1,1,30),
-    G('4',2,6,10,18,31,2,2), G('5',31,16,16,30,1,1,30),
-    G('6',6,8,16,30,17,17,14), G('7',31,1,2,4,8,8,8),
-    G('8',14,17,17,14,17,17,14), G('9',14,17,17,15,1,2,12),
-    G('A',14,17,17,31,17,17,17), G('B',30,17,17,30,17,17,30),
-    G('C',14,17,16,16,16,17,14), G('D',30,17,17,17,17,17,30),
-    G('E',31,16,16,30,16,16,31), G('F',31,16,16,30,16,16,16),
-    G('G',14,17,16,23,17,17,14), G('H',17,17,17,31,17,17,17),
-    G('I',14,4,4,4,4,4,14), G('J',1,1,1,1,17,17,14),
-    G('K',17,18,20,24,20,18,17), G('L',16,16,16,16,16,16,31),
-    G('M',17,27,21,21,17,17,17), G('N',17,25,21,21,19,19,17),
-    G('O',14,17,17,17,17,17,14), G('P',30,17,17,30,16,16,16),
-    G('Q',14,17,17,17,21,18,13), G('R',30,17,17,30,20,18,17),
-    G('S',15,16,16,14,1,1,30), G('T',31,4,4,4,4,4,4),
-    G('U',17,17,17,17,17,17,14), G('V',17,17,17,17,17,10,4),
-    G('W',17,17,17,21,21,21,10), G('X',17,17,10,4,10,17,17),
-    G('Y',17,17,10,4,4,4,4), G('Z',31,1,2,4,8,16,31)
+static const Glyph font[]={
+ G(' ',0,0,0,0,0,0,0),G('#',10,31,10,10,31,10,0),G('.',0,0,0,0,0,6,6),G(':',0,6,6,0,6,6,0),G('-',0,0,0,31,0,0,0),
+ G('0',14,17,19,21,25,17,14),G('1',4,12,4,4,4,4,14),G('2',14,17,1,2,4,8,31),G('3',30,1,1,14,1,1,30),
+ G('4',2,6,10,18,31,2,2),G('5',31,16,16,30,1,1,30),G('6',6,8,16,30,17,17,14),G('7',31,1,2,4,8,8,8),
+ G('8',14,17,17,14,17,17,14),G('9',14,17,17,15,1,2,12),G('A',14,17,17,31,17,17,17),G('B',30,17,17,30,17,17,30),
+ G('C',14,17,16,16,16,17,14),G('D',30,17,17,17,17,17,30),G('E',31,16,16,30,16,16,31),G('F',31,16,16,30,16,16,16),
+ G('G',14,17,16,23,17,17,14),G('H',17,17,17,31,17,17,17),G('I',14,4,4,4,4,4,14),G('J',1,1,1,1,17,17,14),
+ G('K',17,18,20,24,20,18,17),G('L',16,16,16,16,16,16,31),G('M',17,27,21,21,17,17,17),G('N',17,25,21,21,19,19,17),
+ G('O',14,17,17,17,17,17,14),G('P',30,17,17,30,16,16,16),G('Q',14,17,17,17,21,18,13),G('R',30,17,17,30,20,18,17),
+ G('S',15,16,16,14,1,1,30),G('T',31,4,4,4,4,4,4),G('U',17,17,17,17,17,17,14),G('V',17,17,17,17,17,10,4),
+ G('W',17,17,17,21,21,21,10),G('X',17,17,10,4,10,17,17),G('Y',17,17,10,4,4,4,4),G('Z',31,1,2,4,8,16,31)
 };
 #undef G
 
 static const Glyph *glyph(char c)
 {
-    for (size_t i=0; i<sizeof(font)/sizeof(font[0]); ++i)
-        if (font[i].c == c) return &font[i];
+    for(size_t i=0;i<sizeof(font)/sizeof(font[0]);i++) if(font[i].c==c) return &font[i];
     return &font[0];
 }
 
-static void text(const Frame *f, int x, int y, const char *s, int scale, Color c)
+static void text(const Frame *f,int x,int y,const char *s,int scale,Color c)
 {
-    int cursor = x;
-    while (s && *s) {
-        const Glyph *g = glyph(*s++);
-        for (int gy=0; gy<7; ++gy) for (int gx=0; gx<5; ++gx) {
-            if (!(g->rows[gy] & (1u << (4-gx)))) continue;
-            for (int sy=0; sy<scale; ++sy)
-                for (int sx=0; sx<scale; ++sx)
-                    put_pixel(f,cursor+gx*scale+sx,y+gy*scale+sy,c);
-        }
-        cursor += 6*scale;
+    int cur=x;
+    while(s&&*s) {
+        const Glyph *g=glyph(*s++);
+        for(int gy=0;gy<7;gy++) for(int gx=0;gx<5;gx++) if(g->rows[gy]&(1u<<(4-gx)))
+            for(int sy=0;sy<scale;sy++) for(int sx=0;sx<scale;sx++) put_pixel(f,cur+gx*scale+sx,y+gy*scale+sy,c);
+        cur+=6*scale;
     }
 }
 
-static void centered(const Frame *f, int center, int y, const char *s, int scale, Color c)
+static void centered(const Frame *f,int center,int y,const char *s,int scale,Color c)
 {
-    text(f, center - ((int)strlen(s)*6*scale)/2, y, s, scale, c);
+    text(f,center-((int)strlen(s)*6*scale)/2,y,s,scale,c);
 }
 
 static Target input_target(u32 held)
 {
-    /* No advanced mode: L = top, R = bottom, neither = both. */
-    if ((held & KEY_L) && !(held & KEY_R)) return TARGET_TOP;
-    if ((held & KEY_R) && !(held & KEY_L)) return TARGET_BOTTOM;
+    if((held&KEY_L)&&!(held&KEY_R)) return TARGET_TOP;
+    if((held&KEY_R)&&!(held&KEY_L)) return TARGET_BOTTOM;
     return TARGET_BOTH;
 }
 
-static void apply_color(Color c, Target target)
+static void apply_color(Color c,Target target)
 {
-    if (target == TARGET_BOTH || target == TARGET_TOP) top_color = c;
-    if (target == TARGET_BOTH || target == TARGET_BOTTOM) bottom_color = c;
+    if(target==TARGET_BOTH||target==TARGET_TOP) top_color=c;
+    if(target==TARGET_BOTH||target==TARGET_BOTTOM) bottom_color=c;
 }
 
-static bool hex_digit(char c, u8 *v)
+static bool hex_digit(char c,u8 *v)
 {
-    if (c >= '0' && c <= '9') { *v = c-'0'; return true; }
-    if (c >= 'A' && c <= 'F') { *v = c-'A'+10; return true; }
-    if (c >= 'a' && c <= 'f') { *v = c-'a'+10; return true; }
+    if(c>='0'&&c<='9'){*v=c-'0';return true;}
+    if(c>='A'&&c<='F'){*v=c-'A'+10;return true;}
+    if(c>='a'&&c<='f'){*v=c-'a'+10;return true;}
     return false;
 }
 
-static bool parse_hex(const char *s, Color *out)
+static bool parse_hex(const char *s,Color *out)
 {
-    size_t len = strlen(s);
-    const char *p = s;
-    u8 d[6];
-    if (len == 7 && s[0] == '#') p++;
-    else if (len != 6) return false;
-    for (int i=0; i<6; ++i) if (!hex_digit(p[i], &d[i])) return false;
-    out->r=(u8)((d[0]<<4)|d[1]);
-    out->g=(u8)((d[2]<<4)|d[3]);
-    out->b=(u8)((d[4]<<4)|d[5]);
+    size_t len=strlen(s); const char *p=s; u8 d[6];
+    if(len==7&&s[0]=='#') p++; else if(len!=6) return false;
+    for(int i=0;i<6;i++) if(!hex_digit(p[i],&d[i])) return false;
+    out->r=(u8)((d[0]<<4)|d[1]); out->g=(u8)((d[2]<<4)|d[3]); out->b=(u8)((d[4]<<4)|d[5]);
     return true;
 }
 
 static void keyboard(Target target)
 {
-    SwkbdState state;
-    char input[8] = {0};
-    swkbdInit(&state, SWKBD_TYPE_WESTERN, 2, 7);
-    swkbdSetHintText(&state, "#RRGGBB");
-    swkbdSetValidation(&state, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
-    if (swkbdInputText(&state,input,sizeof(input)) != SWKBD_BUTTON_CONFIRM) return;
-    Color c;
-    if (parse_hex(input,&c)) { custom_color=c; apply_color(c,target); }
+    SwkbdState state; char input[8]={0};
+    swkbdInit(&state,SWKBD_TYPE_WESTERN,2,7);
+    swkbdSetHintText(&state,"#RRGGBB");
+    swkbdSetValidation(&state,SWKBD_NOTEMPTY_NOTBLANK,0,0);
+    if(swkbdInputText(&state,input,sizeof(input))!=SWKBD_BUTTON_CONFIRM) return;
+    Color c; if(parse_hex(input,&c)){custom_color=c;apply_color(c,target);}
+}
+
+static Color darken(Color c)
+{
+    c.r=(u8)((u16)c.r*3/4); c.g=(u8)((u16)c.g*3/4); c.b=(u8)((u16)c.b*3/4); return c;
 }
 
 static void draw_menu(const Frame *f)
 {
     const Color panel={35,39,48}, inactive={53,58,70};
     const Color selected={58,102,190}, white={245,247,250}, close={125,48,55};
-
-    /* Keep the area outside the menu the same color as the bottom screen. */
     clear_frame(f,bottom_color);
     rounded_rect(f,8,8,304,224,12,panel);
-    rounded_rect(f,18,18,142,30,8,tab==0?selected:inactive);
-    rounded_rect(f,160,18,142,30,8,tab==1?selected:inactive);
-    centered(f,89,27,"COMMON",2,white);
-    centered(f,231,27,"CUSTOM",2,white);
 
-    if (tab == 0) {
-        for (int i=0;i<COMMON_COUNT;++i) {
-            int col=i%4, row=i/4;
-            rounded_rect(f,18+col*72,58+row*41,64,34,7,common_colors[i]);
+    /* Smaller tabs with a real gap between them. */
+    Color common_bg=(tab==0)?selected:inactive;
+    Color custom_bg=(tab==1)?selected:inactive;
+    if(pressed_button==BTN_TAB_COMMON) common_bg=darken(common_bg);
+    if(pressed_button==BTN_TAB_CUSTOM) custom_bg=darken(custom_bg);
+    rounded_rect(f,18,18,136,30,8,common_bg);
+    rounded_rect(f,166,18,136,30,8,custom_bg);
+    centered(f,86,27,"COMMON",2,white);
+    centered(f,234,27,"CUSTOM",2,white);
+
+    if(tab==0) {
+        for(int i=0;i<COMMON_COUNT;i++) {
+            int col=i%4,row=i/4;
+            Color c=common_colors[i];
+            if(pressed_button==BTN_COLOR_BASE+i) c=darken(c);
+            rounded_rect(f,18+col*72,58+row*41,64,34,7,c);
         }
     } else {
-        const Color button={53,58,70};
+        Color button={53,58,70};
+        if(pressed_button==BTN_HEX) button=darken(button);
         rounded_rect(f,34,70,252,60,10,button);
         centered(f,160,85,"ENTER HEX",2,white);
         centered(f,160,108,"TAP TO TYPE",1,white);
     }
 
-    rounded_rect(f,18,194,284,28,8,close);
+    Color close_bg=close;
+    if(pressed_button==BTN_CLOSE) close_bg=darken(close_bg);
+    rounded_rect(f,18,194,284,28,8,close_bg);
     centered(f,160,203,"CLOSE MENU",2,white);
 }
 
 static void render(void)
 {
-    Frame top=frame_get(GFX_TOP);
-    Frame bottom=frame_get(GFX_BOTTOM);
-
+    Frame top=frame_get(GFX_TOP), bottom=frame_get(GFX_BOTTOM);
     clear_frame(&top,top_color);
     clear_frame(&bottom,bottom_color);
-    if (menu_open) draw_menu(&bottom);
-
+    if(menu_open) draw_menu(&bottom);
     gfxFlushBuffers();
     gfxSwapBuffers();
 }
 
-static bool held_one_second(u32 held, bool *was_held, u64 *start)
+static bool held_one_second(u32 held,bool *was_held,u64 *start)
 {
-    if (held) {
-        if (!*was_held) {
-            *was_held=true;
-            *start=svcGetSystemTick();
-        } else if (svcGetSystemTick()-*start >= HOLD_TICKS) {
-            return true;
-        }
-    } else {
-        *was_held=false;
-    }
+    if(held) {
+        if(!*was_held){*was_held=true;*start=svcGetSystemTick();}
+        else if(svcGetSystemTick()-*start>=HOLD_TICKS) return true;
+    } else *was_held=false;
     return false;
 }
 
-static void touch_menu(u32 keys_down, u32 keys_held)
+static int hit_test(int x,int y)
 {
-    if (!(keys_down & KEY_TOUCH)) return;
-
-    touchPosition t;
-    hidTouchRead(&t);
-    int x=(int)t.px, y=(int)t.py;
-    Target target=input_target(keys_held);
-
-    if (y>=18 && y<48) {
-        if (x>=18 && x<160) tab=0;
-        else if (x>=160 && x<302) tab=1;
-        return;
+    if(y>=18&&y<48) {
+        if(x>=18&&x<154) return BTN_TAB_COMMON;
+        if(x>=166&&x<302) return BTN_TAB_CUSTOM;
+        return NO_BUTTON;
     }
-
-    if (tab==0 && x>=18 && x<306 && y>=58 && y<181) {
-        int col=(x-18)/72, row=(y-58)/41;
-        int local_x=(x-18)%72, local_y=(y-58)%41;
-        if (col>=0 && col<4 && row>=0 && row<3 && local_x<64 && local_y<34) {
-            int index=row*4+col;
-            if (index<COMMON_COUNT) apply_color(common_colors[index],target);
+    if(tab==0&&x>=18&&x<306&&y>=58&&y<181) {
+        int col=(x-18)/72,row=(y-58)/41;
+        int lx=(x-18)%72,ly=(y-58)%41;
+        if(col>=0&&col<4&&row>=0&&row<3&&lx<64&&ly<34) {
+            int i=row*4+col;
+            if(i<COMMON_COUNT) return BTN_COLOR_BASE+i;
         }
-        return;
+    }
+    if(tab==1&&x>=34&&x<286&&y>=70&&y<130) return BTN_HEX;
+    if(x>=18&&x<302&&y>=194&&y<222) return BTN_CLOSE;
+    return NO_BUTTON;
+}
+
+static void activate_button(int button,u32 held)
+{
+    Target target=input_target(held);
+    if(button==BTN_TAB_COMMON) tab=0;
+    else if(button==BTN_TAB_CUSTOM) tab=1;
+    else if(button==BTN_CLOSE) menu_open=false;
+    else if(button>=BTN_COLOR_BASE&&button<BTN_COLOR_BASE+COMMON_COUNT) apply_color(common_colors[button-BTN_COLOR_BASE],target);
+    else if(button==BTN_HEX) keyboard(target);
+}
+
+/* Buttons now use press-and-release semantics: press inside, keep holding,
+   then release while still inside the same button. */
+static void update_touch(u32 down,u32 held)
+{
+    touchPosition t;
+    bool touching=(held&KEY_TOUCH)!=0;
+
+    if(down&KEY_TOUCH) {
+        hidTouchRead(&t);
+        pressed_button=hit_test((int)t.px,(int)t.py);
     }
 
-    if (tab==1 && x>=34 && x<286 && y>=70 && y<130) {
-        keyboard(target);
-        return;
+    if(touching) {
+        if(pressed_button!=NO_BUTTON) {
+            hidTouchRead(&t);
+            if(hit_test((int)t.px,(int)t.py)!=pressed_button) pressed_button=NO_BUTTON;
+        }
+    } else if(pressed_button!=NO_BUTTON) {
+        /* KEY_TOUCH just released. Re-read the final position and activate
+           only if the stylus was released over the original button. */
+        hidTouchRead(&t);
+        int button=hit_test((int)t.px,(int)t.py);
+        int pressed=pressed_button;
+        pressed_button=NO_BUTTON;
+        if(button==pressed) activate_button(pressed,held);
     }
-
-    if (x>=18 && x<302 && y>=194 && y<222) menu_open=false;
 }
 
 int main(void)
@@ -340,24 +306,22 @@ int main(void)
     gfxInitDefault();
     gfxSet3D(false);
 
-    while (aptMainLoop()) {
+    while(aptMainLoop()) {
         hidScanInput();
         u32 down=hidKeysDown();
         u32 held=hidKeysHeld();
 
-        /* SELECT held for one second exits from anywhere. */
-        if (held_one_second(held & KEY_SELECT,&select_held,&select_tick)) break;
+        if(held_one_second(held&KEY_SELECT,&select_held,&select_tick)) break;
 
-        /* START held for one second opens the menu. */
-        if (!menu_open && held_one_second(held & KEY_START,&start_held,&start_tick)) {
-            menu_open=true;
-            tab=0;
-            start_held=false;
+        if(!menu_open&&held_one_second(held&KEY_START,&start_held,&start_tick)) {
+            menu_open=true; tab=0; pressed_button=NO_BUTTON; start_held=false;
         }
 
-        if (menu_open) {
-            if (down & KEY_B) menu_open=false;
-            else touch_menu(down,held);
+        if(menu_open) {
+            if(down&KEY_B) { menu_open=false; pressed_button=NO_BUTTON; }
+            else update_touch(down,held);
+        } else {
+            pressed_button=NO_BUTTON;
         }
 
         render();
