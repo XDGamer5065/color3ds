@@ -3,7 +3,11 @@ name: Build 3DS app
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -17,6 +21,12 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Show repository
+        run: |
+          pwd
+          ls -la
+          ls -la source
 
       - name: Build
         run: make -j$(nproc)
