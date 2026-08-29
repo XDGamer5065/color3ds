@@ -34,7 +34,7 @@ CFLAGS  += $(INCLUDE)
 CXXFLAGS := $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS  := -g
 
-LDFLAGS  := -specs=3dsx.specs -g \
+LDFLAGS  := -g \
             -Wl,-Map,$(notdir $*.map)
 
 LIBS     := -lctru -lm
