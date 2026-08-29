@@ -1,0 +1,8 @@
+build/
+*.elf
+*.map
+*.o
+*.d
+*.3dsx
+*.cia
+*.smdh
