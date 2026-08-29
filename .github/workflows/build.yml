@@ -1,0 +1,29 @@
+name: Build 3DS app
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build 3DSX
+    runs-on: ubuntu-latest
+
+    # devkitPro publishes a ready-to-use devkitARM container.
+    container:
+      image: devkitpro/devkitarm:latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build
+        run: make -j$(nproc)
+
+      - name: Upload 3DSX
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-color-changer-3dsx
+          path: ScreenColorChanger.3dsx
+          if-no-files-found: error
