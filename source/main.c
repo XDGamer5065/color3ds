@@ -38,18 +38,30 @@ static u64 start_tick = 0;
 static u64 select_tick = 0;
 
 /*
- * gfxInitDefault() uses GSP_BGR8_OES. A pixel is three bytes in B,G,R order.
- * The hardware framebuffer is rotated: logical (x,y) is stored at
- * x * 240 + (239-y). The top screen has 400 logical pixels horizontally;
- * the bottom has 320. Never use a 16-bit pixel type here.
+ * 3DS framebuffers use 24-bit BGR pixels and are stored rotated.
+ * The physical framebuffer dimensions reported by gfxGetFramebuffer()
+ * are 240x400 for the top screen and 240x320 for the bottom screen.
+ * For drawing, however, we use the logical dimensions of 400x240 and
+ * 320x240. Logical (x,y) maps to x * 240 + (239-y).
  */
 static Frame frame_get(gfxScreen_t screen)
 {
     Frame f;
-    u16 w = 0, h = 0;
-    f.data = gfxGetFramebuffer(screen, GFX_LEFT, &w, &h);
-    f.width = (int)w;
-    f.height = (int)h;
+    u16 physical_w = 0, physical_h = 0;
+
+    f.data = gfxGetFramebuffer(screen, GFX_LEFT, &physical_w, &physical_h);
+
+    (void)physical_w;
+    (void)physical_h;
+
+    if (screen == GFX_TOP) {
+        f.width = TOP_WIDTH;
+        f.height = SCREEN_HEIGHT;
+    } else {
+        f.width = BOTTOM_WIDTH;
+        f.height = SCREEN_HEIGHT;
+    }
+
     return f;
 }
 
@@ -235,10 +247,11 @@ static void keyboard(Target target)
 
 static void draw_menu(const Frame *f)
 {
-    const Color bg={12,14,19}, panel={35,39,48}, inactive={53,58,70};
+    const Color panel={35,39,48}, inactive={53,58,70};
     const Color selected={58,102,190}, white={245,247,250}, close={125,48,55};
 
-    clear_frame(f,bg);
+    /* Keep the area outside the menu the same color as the bottom screen. */
+    clear_frame(f,bottom_color);
     rounded_rect(f,8,8,304,224,12,panel);
     rounded_rect(f,18,18,142,30,8,tab==0?selected:inactive);
     rounded_rect(f,160,18,142,30,8,tab==1?selected:inactive);
