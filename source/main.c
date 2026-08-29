@@ -1,6 +1,8 @@
 #include <3ds.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <math.h>
 #include <string.h>
 
 typedef struct { u8 r,g,b; } Color;
@@ -36,6 +38,133 @@ static bool app_exit_requested=false;
 static int tab=0, pressed_button=NO_BUTTON;
 static Target pressed_target=TARGET_BOTH;
 static u64 start_tick=0, select_tick=0;
+
+/* -------------------------------------------------------------------------
+   Procedural UI audio
+   -------------------------------------------------------------------------
+   Sounds are generated entirely in RAM. No WAV/OGG/MP3 files are needed.
+   The 3DS DSP plays the generated stereo PCM16 buffers directly.
+*/
+#define SOUND_RATE 32728.0f
+#define TAP_SAMPLES 1700
+#define COLOR_SAMPLES 7200
+#define SOUND_CHANNEL_TAP 0
+#define SOUND_CHANNEL_BOTH 1
+#define SOUND_CHANNEL_TOP 2
+#define SOUND_CHANNEL_BOTTOM 3
+
+typedef struct {
+    u32 *samples;
+    size_t sample_count;
+    ndspWaveBuf wave;
+} Sound;
+
+static Sound tap_sound;
+static Sound both_sound;
+static Sound top_sound;
+static Sound bottom_sound;
+static bool audio_ready=false;
+
+static int16_t clamp_sample(float v) {
+    if(v>32767.0f) return 32767;
+    if(v<-32768.0f) return -32768;
+    return (int16_t)v;
+}
+
+static void generate_tone(Sound *sound, size_t count, float start_freq, float end_freq,
+                          float attack, float release, float volume) {
+    sound->sample_count=count;
+    sound->samples=(u32*)linearAlloc(count*sizeof(u32));
+    if(!sound->samples) return;
+
+    float phase=0.0f;
+    for(size_t i=0;i<count;i++) {
+        float t=(float)i/(float)count;
+        float freq=start_freq+(end_freq-start_freq)*t;
+        phase += (2.0f*(float)M_PI*freq)/SOUND_RATE;
+        if(phase>2.0f*(float)M_PI) phase-=2.0f*(float)M_PI;
+
+        float env=1.0f;
+        float a=attack/(float)count;
+        float r=release/(float)count;
+        if(a>0.0f && t<a) env=t/a;
+        if(r>0.0f && t>1.0f-r) env=(1.0f-t)/r;
+        if(env<0.0f) env=0.0f;
+
+        int16_t s=clamp_sample(sinf(phase)*32767.0f*volume*env);
+        sound->samples[i]=((u32)(uint16_t)s<<16)|(uint16_t)s;
+    }
+
+    memset(&sound->wave,0,sizeof(sound->wave));
+    sound->wave.data_vaddr=sound->samples;
+    sound->wave.nsamples=count;
+    DSP_FlushDataCache(sound->samples,count*sizeof(u32));
+}
+
+static void init_sound_channel(int channel) {
+    float mix[12];
+    memset(mix,0,sizeof(mix));
+    mix[0]=1.0f;
+    mix[1]=1.0f;
+    ndspChnSetInterp(channel,NDSP_INTERP_LINEAR);
+    ndspChnSetRate(channel,SOUND_RATE);
+    ndspChnSetFormat(channel,NDSP_FORMAT_STEREO_PCM16);
+    ndspChnSetMix(channel,mix);
+}
+
+static bool sound_busy(Sound *sound) {
+    return sound->wave.status==NDSP_WBUF_PLAYING;
+}
+
+static void play_sound(Sound *sound,int channel) {
+    if(!audio_ready || !sound->samples) return;
+    ndspChnWaveBufClear(channel);
+    sound->wave.status=NDSP_WBUF_FREE;
+    ndspChnWaveBufAdd(channel,&sound->wave);
+}
+
+static void init_audio(void) {
+    if(R_FAILED(ndspInit())) return;
+    ndspSetOutputMode(NDSP_OUTPUT_STEREO);
+
+    generate_tone(&tap_sound,TAP_SAMPLES,760.0f,560.0f,70.0f,450.0f,0.18f);
+    generate_tone(&both_sound,COLOR_SAMPLES,440.0f,660.0f,400.0f,2200.0f,0.16f);
+    generate_tone(&top_sound,COLOR_SAMPLES,660.0f,880.0f,400.0f,2200.0f,0.16f);
+    generate_tone(&bottom_sound,COLOR_SAMPLES,330.0f,440.0f,400.0f,2200.0f,0.16f);
+
+    if(tap_sound.samples && both_sound.samples && top_sound.samples && bottom_sound.samples) {
+        init_sound_channel(SOUND_CHANNEL_TAP);
+        init_sound_channel(SOUND_CHANNEL_BOTH);
+        init_sound_channel(SOUND_CHANNEL_TOP);
+        init_sound_channel(SOUND_CHANNEL_BOTTOM);
+        audio_ready=true;
+    }
+}
+
+static void exit_audio(void) {
+    if(!audio_ready && !tap_sound.samples && !both_sound.samples && !top_sound.samples && !bottom_sound.samples)
+        return;
+    ndspChnWaveBufClear(SOUND_CHANNEL_TAP);
+    ndspChnWaveBufClear(SOUND_CHANNEL_BOTH);
+    ndspChnWaveBufClear(SOUND_CHANNEL_TOP);
+    ndspChnWaveBufClear(SOUND_CHANNEL_BOTTOM);
+    if(tap_sound.samples) linearFree(tap_sound.samples);
+    if(both_sound.samples) linearFree(both_sound.samples);
+    if(top_sound.samples) linearFree(top_sound.samples);
+    if(bottom_sound.samples) linearFree(bottom_sound.samples);
+    ndspExit();
+    audio_ready=false;
+}
+
+static void play_ui_tap(void) {
+    play_sound(&tap_sound,SOUND_CHANNEL_TAP);
+}
+
+static void play_color_sound(Target t) {
+    if(t==TARGET_TOP) play_sound(&top_sound,SOUND_CHANNEL_TOP);
+    else if(t==TARGET_BOTTOM) play_sound(&bottom_sound,SOUND_CHANNEL_BOTTOM);
+    else play_sound(&both_sound,SOUND_CHANNEL_BOTH);
+}
 
 static Frame frame_get(gfxScreen_t s) {
     Frame f;
@@ -196,7 +325,6 @@ static void draw_credits(const Frame *f) {
     Color panel={35,39,48},wh={245,247,250},close={70,90,125},exitc={125,48,55};
     clear_frame(f,bottom_color); roundrect(f,4,4,312,232,16,panel);
     centered(f,160,16,"COLOR 3DS",3,wh);
-    /* Larger vertical spacing between each piece of information. */
     centered(f,160,50,"A SIMPLE SCREEN COLOR",2,wh);
     centered(f,160,68,"CHANGER FOR NINTENDO 3DS",2,wh);
     centered(f,160,98,"MADE WITH AI",2,wh);
@@ -216,19 +344,27 @@ static int hit(int x,int y) {
 }
 
 static void activate(int b,Target t) {
-    if(b==BTN_CREDITS_CLOSE)credits_open=false;
-    else if(b==BTN_CREDITS_EXIT){credits_open=false;menu_open=false;app_exit_requested=true;}
-    else if(b==BTN_TAB_COMMON)tab=0; else if(b==BTN_TAB_CUSTOM)tab=1; else if(b==BTN_CLOSE)menu_open=false;
-    else if(b==BTN_APPLY)apply_color(custom_color,t); else if(b==BTN_HEX)keyboard();
-    else if(b>=BTN_COLOR_BASE&&b<BTN_COLOR_BASE+COMMON_COUNT)apply_color(common_colors[b-BTN_COLOR_BASE],t);
+    if(b==BTN_CREDITS_CLOSE){credits_open=false;play_ui_tap();}
+    else if(b==BTN_CREDITS_EXIT){credits_open=false;menu_open=false;app_exit_requested=true;play_ui_tap();}
+    else if(b==BTN_TAB_COMMON){tab=0;play_ui_tap();}
+    else if(b==BTN_TAB_CUSTOM){tab=1;play_ui_tap();}
+    else if(b==BTN_CLOSE){menu_open=false;play_ui_tap();}
+    else if(b==BTN_APPLY){apply_color(custom_color,t);play_color_sound(t);}
+    else if(b==BTN_HEX){play_ui_tap();keyboard();}
+    else if(b>=BTN_COLOR_BASE&&b<BTN_COLOR_BASE+COMMON_COUNT){apply_color(common_colors[b-BTN_COLOR_BASE],t);play_color_sound(t);}
 }
 
 static void touch_update(u32 down,u32 held) {
     static int touch_button=NO_BUTTON; static bool touching=false; touchPosition p;
-    if(down&KEY_TOUCH){hidTouchRead(&p);touch_button=hit(p.px,p.py);pressed_button=touch_button;pressed_target=target(held);touching=true;return;}
+    if(down&KEY_TOUCH){
+        hidTouchRead(&p);touch_button=hit(p.px,p.py);pressed_button=touch_button;pressed_target=target(held);touching=true;return;
+    }
     if(!touching)return;
-    if(held&KEY_TOUCH){hidTouchRead(&p);if(hit(p.px,p.py)!=touch_button){touch_button=NO_BUTTON;pressed_button=NO_BUTTON;}return;}
-    if(touch_button!=NO_BUTTON)activate(touch_button,pressed_target);touch_button=NO_BUTTON;pressed_button=NO_BUTTON;touching=false;
+    if(held&KEY_TOUCH){
+        hidTouchRead(&p);if(hit(p.px,p.py)!=touch_button){touch_button=NO_BUTTON;pressed_button=NO_BUTTON;}return;
+    }
+    if(touch_button!=NO_BUTTON)activate(touch_button,pressed_target);
+    touch_button=NO_BUTTON;pressed_button=NO_BUTTON;touching=false;
 }
 
 static void update_slider(u32 held) {
@@ -238,22 +374,35 @@ static void update_slider(u32 held) {
 }
 
 int main(void) {
-    gfxInitDefault(); Color green={0,255,0};top_color=green;bottom_color=green;custom_color=green;
+    gfxInitDefault();
+    init_audio();
+
+    Color green={0,255,0};top_color=green;bottom_color=green;custom_color=green;
     while(aptMainLoop()&&!app_exit_requested){
         hidScanInput();u32 kDown=hidKeysDown(),kHeld=hidKeysHeld();
-        if(kHeld&KEY_SELECT){if(!select_held){select_tick=svcGetSystemTick();select_held=true;}else if(!credits_open&&svcGetSystemTick()-select_tick>=HOLD_TICKS){credits_open=true;menu_open=false;pressed_button=NO_BUTTON;}}
-        else select_held=false;
-        if(kHeld&KEY_START){if(!start_held){start_tick=svcGetSystemTick();start_held=true;}else if(!menu_open&&!credits_open&&svcGetSystemTick()-start_tick>=HOLD_TICKS){menu_open=true;tab=0;pressed_button=NO_BUTTON;}}
-        else start_held=false;
-        if(kDown&KEY_B){if(credits_open)credits_open=false;else if(menu_open)menu_open=false;else break;}
+        if(kHeld&KEY_SELECT){
+            if(!select_held){select_tick=svcGetSystemTick();select_held=true;}
+            else if(!credits_open&&svcGetSystemTick()-select_tick>=HOLD_TICKS){credits_open=true;menu_open=false;pressed_button=NO_BUTTON;play_ui_tap();}
+        } else select_held=false;
+        if(kHeld&KEY_START){
+            if(!start_held){start_tick=svcGetSystemTick();start_held=true;}
+            else if(!menu_open&&!credits_open&&svcGetSystemTick()-start_tick>=HOLD_TICKS){menu_open=true;tab=0;pressed_button=NO_BUTTON;play_ui_tap();}
+        } else start_held=false;
+        if(kDown&KEY_B){
+            if(credits_open){credits_open=false;play_ui_tap();}
+            else if(menu_open){menu_open=false;play_ui_tap();}
+            else break;
+        }
 
-        /* Credits use the same press-and-release touch handling as the main menu. */
-        if(credits_open){touch_update(kDown,kHeld);}
+        if(credits_open)touch_update(kDown,kHeld);
         else if(menu_open){touch_update(kDown,kHeld);update_slider(kHeld);}
 
-        Frame top=frame_get(GFX_TOP),bottom=frame_get(GFX_BOTTOM);clear_frame(&top,top_color);clear_frame(&bottom,bottom_color);
+        Frame top=frame_get(GFX_TOP),bottom=frame_get(GFX_BOTTOM);
+        clear_frame(&top,top_color);clear_frame(&bottom,bottom_color);
         if(credits_open)draw_credits(&bottom);else if(menu_open)draw_menu(&bottom);
         gfxFlushBuffers();gspWaitForVBlank();gfxSwapBuffers();
     }
-    gfxExit();return 0;
+    exit_audio();
+    gfxExit();
+    return 0;
 }
