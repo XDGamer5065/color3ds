@@ -4,6 +4,20 @@
 
 A simple Nintendo 3DS homebrew app that lets you change the color displayed on the 3DS screens.
 
+## Screenshots
+
+### Main screen
+
+![Main screen](screenshots/main-screen.png)
+
+### Common colors menu
+
+![Common colors menu](screenshots/menu.png)
+
+### Custom colors menu
+
+![Custom colors menu](screenshots/custom.png)
+
 ## Features
 
 - Solid colors across the screen with no tint or overlay.
