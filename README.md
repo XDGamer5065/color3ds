@@ -6,17 +6,11 @@ A simple Nintendo 3DS homebrew app that lets you change the color displayed on t
 
 ## Screenshots
 
-### Main screen
-
-![Main screen](screenshots/main-screen.png)
-
-### Common colors menu
-
-![Common colors menu](screenshots/menu.png)
-
-### Custom colors menu
-
-![Custom colors menu](screenshots/custom.png)
+<p align="center">
+  <img src="screenshots/main-screen.png" width="250" alt="Main screen">
+  <img src="screenshots/menu.png" width="250" alt="Common colors menu">
+  <img src="screenshots/custom.png" width="250" alt="Custom colors menu">
+</p>
 
 ## Features
 
